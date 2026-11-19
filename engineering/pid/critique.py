@@ -55,9 +55,44 @@ def _recognised(node: dict) -> bool:
     return node["kind"] != "unknown_block"
 
 
+def _tag_shaped(node: dict) -> bool:
+    """An equipment/instrument tag that parses as ISA-5.1.
+
+    Separates "this block carries an attribute called TAG" from "this block is
+    P&ID content". ``ATTRIBUTE_TAGS`` matches the attribute NAME, and a rack
+    block carries ``TAG`` too - so a 48-rack floor plan was read as 48 pieces of
+    unconnected equipment and every P&ID focus fired on it (measured
+    2026-11-19: 49 issues, all ``pid_*``, on a clean 4-room plan). The tag's
+    SHAPE is the evidence that separates them: ``R1-A01`` fails the grammar that
+    ``P-101`` and ``FT-100`` pass.
+    """
+    tag = node.get("tag")
+    if not tag:
+        return False
+    try:
+        parsed = parse_tag(tag, kind="instrument" if node["kind"] == "instrument" else "auto")
+    except Exception:
+        return False
+    return bool(parsed.get("valid"))
+
+
 def has_pid_content(graph: dict) -> bool:
-    """True when at least one recognised P&ID symbol is on the sheet."""
-    return any(_recognised(n) for n in graph["nodes"])
+    """True when the sheet really holds P&ID content.
+
+    A catalogue block or an XDATA payload is proof on its own. A *heuristic*
+    node (recognised only by its block name or a ``TAG`` attribute) is not: it
+    needs a tag that parses, so a floor plan full of ``TAG`` attributes is not
+    scored as a P&ID. The 0.6-confidence guess stays exactly what spec §9.2
+    calls it - a guess - and no focus rests on it.
+    """
+    for node in graph["nodes"]:
+        if not _recognised(node):
+            continue
+        if node.get("source") != "heuristic":
+            return True                     # catalogue / xdata: the drawing says so
+        if _tag_shaped(node):
+            return True                     # a real ISA-5.1 tag backs the guess
+    return False
 
 
 def _scored_nodes(graph: dict) -> list[dict]:

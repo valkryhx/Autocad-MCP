@@ -493,3 +493,42 @@ async def test_a_duplicate_with_one_attribute_tag_and_one_guess_is_a_warning(bac
     (issue,) = await backend.drawing_critique(["pid_duplicate_tag"])
     assert issue.severity == "warning"
     assert issue.detail["tag_sources"] == {tagged["handle"]: "attribute", guessed["handle"]: "text"}
+
+
+
+def test_a_floor_plan_with_tag_attributes_is_not_pid_content():
+    """An attribute NAMED ``TAG`` is not evidence of P&ID content.
+
+    Measured 2026-11-19 on a clean 4-room equipment plan: every rack block
+    carried a ``TAG`` attribute (``R1-A01`` ...), ``ATTRIBUTE_TAGS`` matched the
+    name, and 48 racks became 48 heuristic "equipment" nodes. ``has_pid_content``
+    said yes, so all seven P&ID focuses ran: 48 ``pid_illegal_tag`` warnings for
+    tags that are perfectly legal rack names, plus one ``pid_dangling_line`` for
+    a door leaf. A drafter reading that report would chase 49 non-defects.
+
+    The separator is the tag's SHAPE, not the attribute's name.
+    """
+    from engineering.pid.critique import has_pid_content
+
+    def node(source, tag, kind="equipment"):
+        return {"id": "h", "kind": kind, "source": source, "tag": tag}
+
+    # A floor plan: recognised by attribute name, but the tags are not ISA-5.1.
+    assert not has_pid_content({"nodes": [node("heuristic", "R1-A01")]})
+    assert not has_pid_content(
+        {"nodes": [node("heuristic", f"R{r}-{'AB'[row]}{k:02d}")
+                   for r in range(1, 5) for row in range(2) for k in range(1, 7)]}
+    )
+
+    # A real P&ID still counts.
+    assert has_pid_content({"nodes": [node("heuristic", "P-101")]})
+    assert has_pid_content({"nodes": [node("heuristic", "FT-100", "instrument")]})
+
+    # Catalogue and XDATA evidence is taken on its own, no tag needed.
+    assert has_pid_content({"nodes": [node("catalog", None)]})
+    assert has_pid_content({"nodes": [node("xdata", None)]})
+
+    # A 0.3 touch guess never counts in either direction.
+    assert not has_pid_content({"nodes": [{"id": "h", "kind": "unknown_block",
+                                           "source": "inferred", "tag": None}]})
+    assert not has_pid_content({"nodes": []})
