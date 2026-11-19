@@ -612,6 +612,46 @@ def _drop_app_if_connection_lost(exc: BaseException) -> bool:
     return True
 
 
+#: The AutoCAD-facility HRESULT a DXF save failure carries in its excepinfo
+#: (facility 33, code 99 -> ``0x80210063``). MEASURED 2026-11-19 on AutoCAD 2026:
+#: every in-place save of an existing DXF answered this, while the identical
+#: DWG save succeeded.
+_ACAD_SAVE_FAILED = -2145320861  # 0x80210063
+
+#: ``DISP_E_EXCEPTION``: the generic "the call ran and failed" answer. AutoCAD
+#: puts its own words in the excepinfo, which is how a DXF save failure reads
+#: ``发生意外。 (保存文档时出错)``.
+_DISP_E_EXCEPTION = -2147352567
+
+#: The phrases AutoCAD uses for a save that did not happen, in the languages
+#: this machine reports. The HRESULT alone is not enough: ``_run`` re-raises a
+#: ``RuntimeError`` carrying the HRESULT only as text, and DISP_E_EXCEPTION is
+#: how *any* failed ActiveX call surfaces - so a save that fails for a real
+#: reason (a write-protected folder, say) must not be retried as this quirk.
+_SAVE_FAILURE_WORDS = ("保存文档时出错", "Error saving the document", "error saving")
+
+#: The ``{hr:#010x}`` spellings ``_run`` writes into its ``RuntimeError`` message.
+_SAVE_HRESULTS = (_DISP_E_EXCEPTION, _ACAD_SAVE_FAILED)
+
+
+def _is_dxf_save_failure(exc: BaseException) -> bool:
+    """Whether ``exc`` is the DXF in-place save failure (not a lost connection).
+
+    Deliberately narrow. ``_run`` turns a COM failure into a ``RuntimeError``
+    whose message reads ``AutoCAD COM error (-0x7ffdfff7): 发生意外。 (保存文档时出错)``
+    - the HRESULT is text, not ``args[0]`` - so this matches on the message:
+    a save-shaped phrase plus one of the two HRESULTs that failure carries.
+    Anything else (a lost connection, a busy server, a read-only folder) is a
+    real failure the caller has to see.
+    """
+    text = str(exc)
+    if not any(word.lower() in text.lower() for word in _SAVE_FAILURE_WORDS):
+        return False
+    if _hresult_of(exc) in _CONNECTION_LOST:
+        return False
+    return any(f"{hr:#010x}" in text for hr in _SAVE_HRESULTS)
+
+
 def _app_identity(app) -> tuple:
     """Which running AutoCAD ``app`` is: ``(HWND, process id)`` of its main window.
 
@@ -4532,12 +4572,124 @@ class ComBackend(ComCheckpoints, AutoCADBackend):
             self._rekey_bound_sync(doc)
             return {"ok": True, "path": doc.FullName}, _dbmod_of(doc)
 
-        result, dbmod = await self._run(_sync)
+        try:
+            result, dbmod = await self._run(_sync)
+        except RuntimeError as exc:
+            if not _is_dxf_save_failure(exc):
+                raise
+            # MEASURED (AutoCAD 2026, 2026-11-19): a DXF that already exists on
+            # disk cannot be written over. `Save()` and `SaveAs(same path, 61)`
+            # both answer DISP_E_EXCEPTION / "保存文档时出错" (0x80210063, an
+            # AutoCAD-facility HRESULT). It is not a lock, a permission, a path,
+            # ISAVEPERCENT or ISAVEBAK: DWG saves fine everywhere, and a DXF this
+            # session created with SaveAs (never closed) saves fine too. The
+            # physical cause is that SaveAs re-points the document without
+            # releasing the handle on the file it came from, so AutoCAD ends up
+            # trying to overwrite a file it still holds exclusively.
+            #
+            # `Close(True)` is not a way out: it answers without error and
+            # silently drops the edits (measured: 1078 entities before and
+            # after, the new circle gone).
+            #
+            # So round-trip it: SaveAs to a temp, close the document (which is
+            # what actually frees the handle), copy the temp over the target,
+            # reopen. Verified end to end - 1078 -> 1079 entities, the new
+            # circle present in the reopened document.
+            result, dbmod = await self._run_dxf_save_round_trip(path, source)
+            result["save_fallback"] = {
+                "reason": "dxf_in_place_save_unsupported",
+                "error": str(exc)[:200],
+                "method": "saveas_temp_close_copy_reopen",
+            }
         entry = self._bound_entry()
-        if source and path and entry is not None and self._same_path(path, source):
+        saved_path = result.get("path")
+        if source and saved_path and entry is not None and self._same_path(saved_path, source):
             entry.pop("recovered_from", None)  # the caller chose to replace the damaged source
-        await self._record_lineage(result["path"], dbmod)
+        await self._record_lineage(saved_path, dbmod)
         return result
+
+    async def _run_dxf_save_round_trip(self, path: str | None, source: str | None):
+        """Save a DXF that cannot be overwritten in place (see `drawing_save`).
+
+        SaveAs to a sibling temp, close the document so AutoCAD releases the
+        target's handle, copy the temp over the target, then reopen it and bind
+        the session to it. Returns ``(result, dbmod)`` shaped like ``_sync``.
+
+        Every step goes through ``_acad_app()`` and ``ActiveDocument`` rather
+        than ``_acad_doc()``. The B11 guard compares the active document with
+        the bound one, and the first SaveAs here legitimately re-points it - so
+        the guard would refuse our own next step with ``active_document_changed``
+        (measured: the round trip died on exactly that). The document this
+        sequence drives is the one it just opened; there is nothing for the
+        guard to decide.
+        """
+        import tempfile
+
+        def _current_doc(app):
+            if app.Documents.Count == 0:
+                raise RuntimeError("No drawing is open in AutoCAD.")
+            return app.ActiveDocument
+
+        def _identify():
+            app = _acad_app()
+            doc = _current_doc(app)
+            return str(doc.Name), str(doc.FullName)
+
+        name, current = await self._run(_identify)
+        target = os.path.abspath(path) if path else os.path.abspath(current)
+        if not target.lower().endswith(".dxf"):
+            raise RuntimeError(f"drawing_save: not a DXF path: {target}")
+
+        folder = os.path.dirname(target) or None
+        handle, tmp = tempfile.mkstemp(suffix=".dxf", prefix=".acadmcp-save-", dir=folder)
+        os.close(handle)
+        try:
+            def _write_temp():
+                app = _acad_app()
+                doc = _current_doc(app)
+                doc.SaveAs(tmp, 61)          # ac2013_dxf
+                return _dbmod_of(doc)
+
+            dbmod = await self._run(_write_temp)
+
+            def _close():
+                # Close must not save: the temp already holds the work, and
+                # Close(True) silently drops edits on this exact document.
+                app = _acad_app()
+                _current_doc(app).Close(False)
+
+            await self._run(_close)
+
+            def _publish():
+                # Both source and temp are closed now, so the copy can land.
+                with open(tmp, "rb") as src_fh:
+                    data = src_fh.read()
+                with open(target, "wb") as dst_fh:
+                    dst_fh.write(data)
+
+            await asyncio.to_thread(_publish)
+
+            def _sync_open():
+                app = _acad_app()
+                doc = app.Documents.Open(target)
+                return {"ok": True, "name": str(doc.Name),
+                        "path": str(doc.FullName)}, _dbmod_of(doc)
+
+            result, reopened_dbmod = await self._run(_sync_open)
+            # The session follows the document it just rewrote: same drawing,
+            # same lineage, re-bound by name.
+            self._bound = None
+            self._document_scope_key = None
+            await self._rebind()
+
+            result["format"] = "dxf"
+            return result, (reopened_dbmod if reopened_dbmod is not None else dbmod)
+        finally:
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                log.warning("drawing_save: temp file %s not removed", tmp)
 
     async def drawing_save_as(self, path: str, fmt: str = "dwg") -> dict:
         self._refuse_recovered_source("drawing_save_as", path, False)
