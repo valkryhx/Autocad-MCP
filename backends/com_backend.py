@@ -576,6 +576,42 @@ def _drop_app() -> None:
     _COM_STATE.pop("vl_docs", None)
 
 
+def _hresult_of(exc: BaseException) -> int | None:
+    """The HRESULT a COM failure carries, or ``None`` for anything else.
+
+    pywin32's ``com_error`` puts it in ``args[0]``. ``AttributeError`` and the
+    other ``AttributeError``-derived wrappers the backend raises around a refused
+    lookup carry no HRESULT at all, and neither do ordinary ``RuntimeError``s -
+    those must never be mistaken for a lost connection.
+    """
+    args = getattr(exc, "args", ())
+    if args and isinstance(args[0], int):
+        return args[0]
+    return None
+
+
+def _drop_app_if_connection_lost(exc: BaseException) -> bool:
+    """Evict the cached proxy when ``exc`` means the connection is gone.
+
+    Every entry point that swallows a COM failure and reports it as a status
+    must call this, or it caches a dead proxy and the outage becomes permanent:
+    ``_acad_app()`` only re-Dispatches when ``"app" not in _COM_STATE``, so a
+    stale proxy is re-used (and re-fails) for the life of the server process.
+    That is the "MCP keeps disconnecting" symptom - the only recovery left is
+    killing the server.
+
+    ``system_status`` is the worst place to miss it: it is the tool a caller
+    reaches for immediately after a failure, and it reports ``connected: false``
+    while leaving the dead object behind for the next call to trip over.
+
+    Returns whether the proxy was dropped, so a caller can say so in its report.
+    """
+    if _hresult_of(exc) not in _CONNECTION_LOST:
+        return False
+    _drop_app()
+    return True
+
+
 def _app_identity(app) -> tuple:
     """Which running AutoCAD ``app`` is: ``(HWND, process id)`` of its main window.
 
@@ -10324,6 +10360,11 @@ class ComBackend(ComCheckpoints, AutoCADBackend):
                 }
             except Exception as exc:
                 log.debug("system_status: _acad_app check failed: %s", exc)
+                # P0 (2026-11-19): a status read is where a caller lands right
+                # after a failure, so this branch must not leave a dead proxy
+                # cached - that made one lost connection permanent and forced a
+                # server restart. See _drop_app_if_connection_lost.
+                dropped = _drop_app_if_connection_lost(exc)
                 status = {
                     "backend": "com",
                     "connected": False,
@@ -10331,6 +10372,12 @@ class ComBackend(ComCheckpoints, AutoCADBackend):
                     "cad_launch": config.settings.cad_launch,
                     "error": str(exc),
                 }
+                if dropped:
+                    # The next call re-Dispatches (and, under CAD_LAUNCH=auto,
+                    # starts AutoCAD again), so say so rather than leaving the
+                    # caller to wonder whether a restart is needed.
+                    status["proxy_dropped"] = True
+                    status["next_call_reconnects"] = True
                 if isinstance(exc, CadNotRunningError):
                     status["error_kind"] = exc.kind  # #19: attach-only, nothing running
                 return status
