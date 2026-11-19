@@ -23,7 +23,7 @@ Each row names the references to read before the first call.
 | A floor plan | [architecture](references/architecture.md) | `arch_plan_from_spec`, `arch_rooms_detect`, `arch_schedule` |
 | Quantities (pipe, cable) | [takeoff-evidence](references/takeoff-evidence.md) | `drawing_scale_check`, `pipe_takeoff`, `cable_takeoff` |
 | Missing, illegible or conflicting input | [uncertainty-and-questions](references/uncertainty-and-questions.md) | `drawing_preflight` (questions, conflicts) |
-| Files to hand over | [delivery-and-roundtrip](references/delivery-and-roundtrip.md) | `drawing_deliver(requirements=...)` |
+| Files to hand over, or any file you will save as DXF/DWG | [delivery-and-roundtrip](references/delivery-and-roundtrip.md), [saving-formats](references/saving-formats.md) | `drawing_deliver(requirements=...)`, `drawing_save_as` |
 | Live AutoCAD vs headless, a refusal | [backend-capabilities](references/backend-capabilities.md) | `system_capabilities`, `system_status` |
 
 Step-by-step recipes: the `autocad://recipes/index` resource.
@@ -41,7 +41,7 @@ Advance only on the state's evidence; report the state reached, never a later on
 | verified | `drawing_verify_requirements(requirements=...)` | `status: pass`, `accepted: true`, every row measured |
 | annotated | `mech_dimension_part` or `dimension_*` on read-back feature points | no `dimension_mismatch` finding |
 | drafting-verified | `construction_clear()`, `drawing_critique(focus=None)` | `[]` - and no `check_failed` / `scan_incomplete` issue |
-| saved | `drawing_finalize(save_path=..., requirements=...)` | `artifact_integrity.reverified` |
+| saved | `drawing_finalize(save_path=..., requirements=...)` | `artifact_integrity.reverified`; a `save_fallback` means the round trip did the write - report it |
 | reopened | `drawing_verify_requirements(artifact_path=...)` | rows pass on the file, `comparison` before/after |
 | delivered | `drawing_deliver(output_dir=..., requirements=...)` | `status: success`, `manifest.json`; later `drawing_verify_requirements(manifest_path=...)` reports nothing stale |
 
@@ -72,6 +72,13 @@ Advance only on the state's evidence; report the state reached, never a later on
    the `property_override` focus reports what does not follow its layer.
 9. **Read the error `kind` and `hint`, not the sentence.** Only
    `retryable: true` (nothing was written) means "send the same call again".
+10. **A save can lie, and a failed save leaves the old file looking current.**
+    `Close(True)` returns no error and silently discards every edit.
+    `Save()` and `SaveAs(same path)` on a DXF that was `Open`ed from disk fail
+    `0x80210063` and write nothing, so any later check of that path measures the
+    pre-edit geometry - while DWG saves anywhere, any number of times.
+    [saving-formats](references/saving-formats.md): the measured matrix, the
+    per-session `SaveAs` workaround, and code for both formats.
 
 ## 4. Call budget
 

@@ -287,7 +287,14 @@ def test_skill_md_links_every_reference_and_example_and_each_exists() -> None:
 # (7,591 characters) ~2.8k, 2.71. The committed SKILL.md (6,425 characters):
 # ~2.4k on-invoke, ~190 always-on. Dividing by 2.4 - below both measured ratios -
 # overestimates the CLI's figure, so the bound errs on the side of a short skill.
-SKILL_TOKEN_BUDGET = 3000
+#
+# Raised from 3000 to 3600 when the DXF save defect was documented (rule 10 and
+# the saving-formats reference). The old bound had 14 tokens of headroom, which
+# forced the save rule to be trimmed until it no longer said why a failed save is
+# dangerous - the one fact that makes it worth a rule at all. A wrong save ends a
+# job silently, so correct guidance outranks the tighter number. The counting
+# method is unchanged, so the new bound is the same measurement with more room.
+SKILL_TOKEN_BUDGET = 3600
 CLI_CHARS_PER_TOKEN = 2.4
 
 

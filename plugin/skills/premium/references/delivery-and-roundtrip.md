@@ -11,12 +11,30 @@ Three different questions, three different pieces of evidence:
 A high score never answers the second question, and a pass in memory never
 answers the third.
 
+## The format trap that stops a job finishing
+
+Before anything else in this file: on AutoCAD 2026 **a DXF cannot be saved to
+the path it was opened from**. `Save()` and `SaveAs(same path)` both raise
+`0x80210063` and write nothing, so the old file stays on disk and every later
+check measures the *pre-edit* drawing. DWG is unaffected. MCP's `drawing_save`
+round-trips around it, but the document is then pointed at the same path again
+and the next save round-trips too — and a save a person makes with Ctrl+S in
+AutoCAD is not covered at all.
+
+The full matrix, the lifetime of the `SaveAs`-to-a-new-name rescue, and
+copy-paste code for both formats:
+[saving-formats](saving-formats.md). Read it before you save anything.
+
 ## Save and reverify
 
 ```text
 drawing_finalize(save_path="out/flange.dxf", screenshot_path="out/flange.png",
                  requirements=req)
 ```
+
+A `save_fallback` in the result is not a failure — the file is written — but it
+does mean the direct save was refused and a round trip did the work. Say so
+when you report, and expect the same on the next save of that document.
 
 The validator and every critique focus run over one read of every space. With
 `requirements`, the requirements are measured on the geometry after the save
