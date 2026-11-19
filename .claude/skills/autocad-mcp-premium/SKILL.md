@@ -24,6 +24,7 @@ Each row names the references to read before the first call.
 | Quantities (pipe, cable) | [takeoff-evidence](references/takeoff-evidence.md) | `drawing_scale_check`, `pipe_takeoff`, `cable_takeoff` |
 | Missing, illegible or conflicting input | [uncertainty-and-questions](references/uncertainty-and-questions.md) | `drawing_preflight` (questions, conflicts) |
 | Files to hand over, or any file you will save as DXF/DWG | [delivery-and-roundtrip](references/delivery-and-roundtrip.md), [saving-formats](references/saving-formats.md) | `drawing_deliver(requirements=...)`, `drawing_save_as` |
+| A picture of the drawing, when screenshots come back blank | [rendering-without-autocad](references/rendering-without-autocad.md) | `scripts/render_svg.py`, `scripts/render_mpl.py` |
 | Live AutoCAD vs headless, a refusal | [backend-capabilities](references/backend-capabilities.md) | `system_capabilities`, `system_status` |
 
 Step-by-step recipes: the `autocad://recipes/index` resource.
@@ -79,6 +80,13 @@ Advance only on the state's evidence; report the state reached, never a later on
     pre-edit geometry - while DWG saves anywhere, any number of times.
     [saving-formats](references/saving-formats.md): the measured matrix, the
     per-session `SaveAs` workaround, and code for both formats.
+11. **A render is not an appearance check.** ezdxf's matplotlib and SVG
+    backends substitute a font silently, so text AutoCAD refuses to draw - a
+    `²` in an SHX style, CJK in `txt.shx` - renders fine here. Measured: the
+    same drawing with `simhei.ttf` and with `txt` differed by 0.009 % of the
+    pixels. Use a render for layer colours and "was anything drawn"; use
+    `text_glyphless` (or the operator's screen) for whether it will print.
+    [rendering-without-autocad](references/rendering-without-autocad.md).
 
 ## 4. Call budget
 
